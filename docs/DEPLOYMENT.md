@@ -1,6 +1,7 @@
-# Deploying Pathwise — Supabase + Render
+# Deploying Pathwise — Supabase + Render (free tier)
 
-The production topology this guide targets:
+Both halves run on **free plans**: a Supabase free-tier Postgres and two Render
+free web services. The topology:
 
 ```
 Browser ──▶ pathwise-frontend (Render, Node/Next.js)
@@ -13,8 +14,20 @@ Browser ──▶ pathwise-frontend (Render, Node/Next.js)
 ```
 
 Everything is driven by [`render.yaml`](../render.yaml) at the repo root — a
-Render Blueprint defining the API, the frontend, and two optional catalogue
-cron jobs.
+Render Blueprint defining the API and the frontend, both on `plan: free`.
+
+**What free costs you** (worth knowing before a demo):
+
+- Free services **spin down after ~15 minutes idle**; the next request takes up
+  to a minute while the instance wakes and the entrypoint re-runs its
+  (idempotent) migrate + seed. **Open both URLs a few minutes before
+  presenting** so everything is warm.
+- The workspace gets **750 free instance-hours/month** — plenty, because
+  sleeping services don't consume hours.
+- **Cron jobs have no free tier**, so the catalogue maintenance jobs are run
+  manually from your machine instead (see the catalogue section below).
+- 512 MB RAM per service — the API serves with a single uvicorn worker (the
+  Dockerfile default), which fits comfortably.
 
 ---
 
@@ -61,8 +74,8 @@ cron jobs.
    | `FIRST_ADMIN_EMAIL` / `FIRST_ADMIN_PASSWORD` | bootstrap admin account |
 
 3. **New → Blueprint**, point it at the repo. Render reads `render.yaml` and
-   creates `pathwise-api` (Docker), `pathwise-frontend` (Node) and the two
-   cron jobs. When prompted for the `sync: false` values:
+   creates `pathwise-api` (Docker) and `pathwise-frontend` (Node), both free.
+   When prompted for the `sync: false` values:
    - `CORS_ORIGINS` → your frontend URL (e.g. `https://pathwise-frontend.onrender.com`)
    - `BACKEND_URL` → your API URL (e.g. `https://pathwise-api.onrender.com`) —
      if you don't know the final names yet, put placeholders and fix them
@@ -93,18 +106,24 @@ gracefully, so Redis is optional. To add it: create a **Render Key Value**
 instance, then set on `pathwise-api`:
 `EMBEDDING_CACHE_BACKEND=redis` and `REDIS_URL=<internal connection string>`.
 
-### The cron jobs
+### Catalogue maintenance (manual on the free tier)
 
-- `pathwise-catalogue-health` (nightly 02:30 UTC) — re-checks every catalogue
-  video against YouTube (~2–3 quota units for the whole catalogue) and
-  deactivates ones that are gone. Only the YouTube provider may deactivate —
-  it can *prove* absence.
-- `pathwise-catalogue-gaps` (weekly Mon 03:00 UTC) — finds real courses for
-  skills nothing teaches (~100 quota units per searched skill), with the LLM
-  judging an engine-vetted shortlist.
+Render cron jobs aren't free, and the catalogue jobs don't need to live in the
+cloud — the pipeline runs from your machine against the production database.
+From `backend/`, with your local `.venv`:
 
-Both reuse the API image with `RUN_SEED=false`; delete them from the
-blueprint if you don't want scheduled jobs.
+```bash
+# nightly-ish — deactivate videos that vanished upstream (~2–3 quota units total)
+DATABASE_URL="<the Supabase DSN>" .venv/bin/python -m scripts.catalogue_pipeline health
+
+# weekly-ish — find real courses for skills nothing teaches (plan first, then spend)
+DATABASE_URL="<the Supabase DSN>" .venv/bin/python -m scripts.catalogue_pipeline gaps --dry-run
+DATABASE_URL="<the Supabase DSN>" .venv/bin/python -m scripts.catalogue_pipeline gaps --yes
+```
+
+Your local `backend/.env` already carries the provider keys; `DATABASE_URL`
+overrides only the database target. If you later move to a paid plan, the two
+cron definitions from this repo's git history restore the scheduled versions.
 
 ### Demo learner
 
@@ -140,4 +159,5 @@ third container) with `BACKEND_URL` pointing at the API.
 - [ ] `CORS_ORIGINS` = frontend origin; `BACKEND_URL` = API origin
 - [ ] Embeddings re-run after any embedding-provider change
 - [ ] Supabase automated backups are on (Settings → Database → Backups)
+- [ ] Free-tier demo: both URLs opened and warm before presenting
 - [ ] Demo learner: keep (public demo) or disable (`DEMO_LEARNER_EMAIL=`)

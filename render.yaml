@@ -1,9 +1,9 @@
-# Render Blueprint — Pathwise on Render + Supabase.
+# Render Blueprint — Pathwise on Render (FREE tier) + Supabase.
 #
-# The database is EXTERNAL: a Supabase Postgres project (pgvector lives there).
-# Before applying this blueprint, create an Environment Group in the Render
-# dashboard named `pathwise-secrets` holding the values that must never live
-# in the repo:
+# The database is EXTERNAL: a Supabase Postgres project (pgvector lives there,
+# also free tier). Before applying this blueprint, create an Environment Group
+# in the Render dashboard named `pathwise-secrets` holding the values that must
+# never live in the repo:
 #
 #   DATABASE_URL          postgresql+asyncpg://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?ssl=require
 #   SECRET_KEY            openssl rand -hex 32
@@ -14,8 +14,15 @@
 #   FIRST_ADMIN_PASSWORD  bootstrap admin
 #
 # Use Supabase's SESSION pooler (port 5432, IPv4) — not the transaction
-# pooler on 6543, which breaks asyncpg's prepared statements. Full walkthrough
-# in docs/DEPLOYMENT.md.
+# pooler on 6543, which breaks asyncpg's prepared statements.
+#
+# Free-tier notes (docs/DEPLOYMENT.md has the full list):
+#   * free services spin down after ~15 min idle; the next request takes up to
+#     a minute while the instance wakes — warm both URLs before a demo;
+#   * cron jobs have NO free tier, so catalogue maintenance is run manually
+#     (see docs/DEPLOYMENT.md §catalogue) instead of on a schedule;
+#   * 512 MB RAM per service — the API deliberately serves with a single
+#     uvicorn worker (the Dockerfile default).
 
 services:
   # ------------------------------------------------------------------ API
@@ -23,7 +30,7 @@ services:
     name: pathwise-api
     runtime: docker
     rootDir: backend
-    plan: starter
+    plan: free
     healthCheckPath: /health/ready
     autoDeploy: true
     envVars:
@@ -53,7 +60,7 @@ services:
     name: pathwise-frontend
     runtime: node
     rootDir: frontend
-    plan: starter
+    plan: free
     buildCommand: npm ci && npm run build
     startCommand: npm run start
     autoDeploy: true
@@ -64,40 +71,3 @@ services:
       # (known after the API's first deploy — set it once in the dashboard).
       - key: BACKEND_URL
         sync: false
-
-  # ------------------------------------------- Catalogue maintenance crons
-  # Optional: delete these two if you don't want scheduled jobs. Both reuse
-  # the API image; the entrypoint runs migrations idempotently first.
-  - type: cron
-    name: pathwise-catalogue-health
-    runtime: docker
-    rootDir: backend
-    plan: starter
-    schedule: "30 2 * * *" # nightly — deactivate videos that vanished upstream
-    dockerCommand: python -m scripts.catalogue_pipeline health
-    envVars:
-      - fromGroup: pathwise-secrets
-      - key: CATALOGUE_PROVIDER
-        value: youtube
-      - key: LOG_FORMAT
-        value: json
-      - key: RUN_SEED
-        value: "false"
-
-  - type: cron
-    name: pathwise-catalogue-gaps
-    runtime: docker
-    rootDir: backend
-    plan: starter
-    schedule: "0 3 * * 1" # weekly — find real courses for skills nothing teaches
-    dockerCommand: python -m scripts.catalogue_pipeline gaps --yes
-    envVars:
-      - fromGroup: pathwise-secrets
-      - key: CATALOGUE_PROVIDER
-        value: youtube
-      - key: LLM_PROVIDER
-        value: claude
-      - key: LOG_FORMAT
-        value: json
-      - key: RUN_SEED
-        value: "false"
