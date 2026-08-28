@@ -1,0 +1,39 @@
+# Production overlay. Use together with the base file:
+#
+#     docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# What it changes and why:
+#   * no source bind mounts — the container runs the code baked into the image,
+#     so a deploy is an image build, not whatever happens to be on disk;
+#   * no --reload — uvicorn serves with real workers;
+#   * postgres and redis stop publishing host ports — only the API (behind
+#     your reverse proxy) is reachable from outside the compose network.
+#
+# Secrets still come from backend/.env (never baked into the image). The
+# reverse proxy (Caddy/nginx/Traefik) terminating TLS in front of :8000 is
+# yours to add — see docs/DEPLOYMENT.md.
+
+services:
+  postgres:
+    ports: !override []
+
+  redis:
+    ports: !override []
+
+  api:
+    volumes: !override []
+    command:
+      [
+        "uvicorn", "app.main:app",
+        "--host", "0.0.0.0", "--port", "8000",
+        "--workers", "2",
+        "--proxy-headers", "--forwarded-allow-ips", "*",
+      ]
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_URL=redis://redis:6379/0
+      - EMBEDDING_CACHE_BACKEND=redis
+      - ENVIRONMENT=production
+      - LOG_FORMAT=json
+      - DEBUG=false

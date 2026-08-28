@@ -1,0 +1,103 @@
+# Render Blueprint — Pathwise on Render + Supabase.
+#
+# The database is EXTERNAL: a Supabase Postgres project (pgvector lives there).
+# Before applying this blueprint, create an Environment Group in the Render
+# dashboard named `pathwise-secrets` holding the values that must never live
+# in the repo:
+#
+#   DATABASE_URL          postgresql+asyncpg://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?ssl=require
+#   SECRET_KEY            openssl rand -hex 32
+#   ANTHROPIC_API_KEY     (or OPENAI_API_KEY — see LLM_PROVIDER below)
+#   OPENAI_API_KEY        semantic embeddings
+#   YOUTUBE_API_KEY       catalogue discovery + health
+#   FIRST_ADMIN_EMAIL     bootstrap admin
+#   FIRST_ADMIN_PASSWORD  bootstrap admin
+#
+# Use Supabase's SESSION pooler (port 5432, IPv4) — not the transaction
+# pooler on 6543, which breaks asyncpg's prepared statements. Full walkthrough
+# in docs/DEPLOYMENT.md.
+
+services:
+  # ------------------------------------------------------------------ API
+  - type: web
+    name: pathwise-api
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    healthCheckPath: /health/ready
+    autoDeploy: true
+    envVars:
+      - fromGroup: pathwise-secrets
+      # The Docker CMD serves on 8000; telling Render keeps its proxy aligned.
+      - key: PORT
+        value: "8000"
+      - key: ENVIRONMENT
+        value: production
+      - key: LOG_FORMAT
+        value: json
+      - key: DEBUG
+        value: "false"
+      - key: LLM_PROVIDER
+        value: claude
+      - key: EMBEDDING_PROVIDER
+        value: openai
+      - key: CATALOGUE_PROVIDER
+        value: youtube
+      # The frontend proxies /api/* server-side, so the browser never makes a
+      # cross-origin call — this only covers direct API docs access.
+      - key: CORS_ORIGINS
+        sync: false
+
+  # ------------------------------------------------------------- Frontend
+  - type: web
+    name: pathwise-frontend
+    runtime: node
+    rootDir: frontend
+    plan: starter
+    buildCommand: npm ci && npm run build
+    startCommand: npm run start
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
+      # The public URL of pathwise-api, e.g. https://pathwise-api.onrender.com
+      # (known after the API's first deploy — set it once in the dashboard).
+      - key: BACKEND_URL
+        sync: false
+
+  # ------------------------------------------- Catalogue maintenance crons
+  # Optional: delete these two if you don't want scheduled jobs. Both reuse
+  # the API image; the entrypoint runs migrations idempotently first.
+  - type: cron
+    name: pathwise-catalogue-health
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    schedule: "30 2 * * *" # nightly — deactivate videos that vanished upstream
+    dockerCommand: python -m scripts.catalogue_pipeline health
+    envVars:
+      - fromGroup: pathwise-secrets
+      - key: CATALOGUE_PROVIDER
+        value: youtube
+      - key: LOG_FORMAT
+        value: json
+      - key: RUN_SEED
+        value: "false"
+
+  - type: cron
+    name: pathwise-catalogue-gaps
+    runtime: docker
+    rootDir: backend
+    plan: starter
+    schedule: "0 3 * * 1" # weekly — find real courses for skills nothing teaches
+    dockerCommand: python -m scripts.catalogue_pipeline gaps --yes
+    envVars:
+      - fromGroup: pathwise-secrets
+      - key: CATALOGUE_PROVIDER
+        value: youtube
+      - key: LLM_PROVIDER
+        value: claude
+      - key: LOG_FORMAT
+        value: json
+      - key: RUN_SEED
+        value: "false"
