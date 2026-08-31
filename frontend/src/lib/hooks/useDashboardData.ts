@@ -6,6 +6,7 @@ import type { DashboardData } from "@/lib/dashboard-data";
 import { emptyDashboardData } from "@/lib/dashboard-data";
 import { buildDashboardData } from "@/lib/derive";
 import { isDemoEmail } from "@/lib/demo-session";
+import { readCache, writeCache } from "@/lib/client-cache";
 import { patchDashboardFromAdaptive } from "@/lib/adaptive";
 import type {
   AdaptiveUpdateResponse,
@@ -37,13 +38,18 @@ export function useDashboardData(): State & {
   reload: () => void;
   applyAdaptive: (res: AdaptiveUpdateResponse) => void;
 } {
-  const [state, setState] = useState<State>({
-    data: emptyDashboardData(),
-    loading: true,
-    error: null,
-    isDemo: false,
-    needsOnboarding: false,
-    missingPath: null,
+  const [state, setState] = useState<State>(() => {
+    // Paint the learner's last known dashboard instantly on reload; the live
+    // fetch below replaces it. Keyed to the signed-in user, never shared.
+    const cached = typeof window !== "undefined" ? readCache<DashboardData>("dashboard") : null;
+    return {
+      data: cached ?? emptyDashboardData(),
+      loading: true,
+      error: null,
+      isDemo: cached?.isDemo ?? false,
+      needsOnboarding: false,
+      missingPath: null,
+    };
   });
 
   const load = useCallback(async () => {
@@ -87,6 +93,7 @@ export function useDashboardData(): State & {
       ]);
 
       const data = buildDashboardData({ profile, roadmap, progress, recommendations, events: eventsPage });
+      writeCache("dashboard", { ...data, isDemo });
       const goalText = profile.profile.goal_text_raw || profile.profile.target_role || "";
       setState({
         data: { ...data, isDemo },

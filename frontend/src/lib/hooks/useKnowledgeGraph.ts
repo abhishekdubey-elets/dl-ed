@@ -12,6 +12,7 @@ import {
 } from "@/lib/graph-derive";
 import type { GraphModel } from "@/lib/graph-view";
 import type { SkillGraphResponse, SkillListItem } from "@/lib/types";
+import { readCache, writeCache } from "@/lib/client-cache";
 
 /** How many target skills we expand closures for. Each one is a request. */
 const MAX_TARGETS = 6;
@@ -34,12 +35,18 @@ const EMPTY: GraphModel = { nodes: [], edges: [], goal: "" };
  * live path; with no session or no path the graph is honestly empty.
  */
 export function useKnowledgeGraph(data: DashboardData) {
-  const [state, setState] = useState<State>({
-    graph: EMPTY,
-    proficiencies: [],
-    loading: true,
-    isDemo: false,
-    error: null,
+  const [state, setState] = useState<State>(() => {
+    const cached =
+      typeof window !== "undefined"
+        ? readCache<{ graph: GraphModel; proficiencies: GraphProficiency[] }>("graph")
+        : null;
+    return {
+      graph: cached?.graph ?? EMPTY,
+      proficiencies: cached?.proficiencies ?? [],
+      loading: true,
+      isDemo: false,
+      error: null,
+    };
   });
 
   const load = useCallback(async () => {
@@ -108,6 +115,7 @@ export function useKnowledgeGraph(data: DashboardData) {
         goal: data.goal,
       });
 
+      writeCache("graph", { graph, proficiencies });
       setState({ graph, proficiencies, loading: false, isDemo: false, error: null });
     } catch (e) {
       setState({

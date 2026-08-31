@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { auth, getToken, setToken } from "@/lib/api";
+import { clearCaches } from "@/lib/client-cache";
 import type { User } from "@/lib/types";
 
 export function useAuth() {
@@ -29,6 +30,7 @@ export function useAuth() {
 
   const signOut = useCallback(() => {
     auth.logout();
+    clearCaches();
     setUser(null);
   }, []);
 
