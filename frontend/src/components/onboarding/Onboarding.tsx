@@ -45,6 +45,7 @@ export function Onboarding() {
   const [reply, setReply] = useState<string | null>(null);
   const [goal, setGoal] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [buildNote, setBuildNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [signals, setSignals] = useState("");
   const [careers, setCareers] = useState<CareerSuggestion[] | null>(null);
@@ -166,29 +167,49 @@ export function Onboarding() {
     if (!goal) return;
     setStage("building");
     setError(null);
-    try {
-      const me = await auth.me();
-      await onboardingApi.generatePath(me.id, goal);
-      router.replace("/dashboard");
-    } catch (e) {
-      // A goal the graph cannot map yet is not a wall — it is exactly what
-      // career discovery is for. Pivot there with the goal as the signal,
-      // instead of stranding the learner on an error under a "Got it".
-      if (e instanceof ApiError && e.code === "goal_unresolved") {
-        setCareers(null);
-        setTurns([{ question: "What are you aiming for?", answer: goal }]);
-        setInterviewQ(null);
-        setStage("discover");
-        setError("I couldn't map that goal exactly — let's find the closest direction.");
-        void advanceInterview();
+    setBuildNote(null);
+    // Free-tier hosting can 502 or drop the connection while the backend wakes
+    // from sleep, and role-graph design for a new goal legitimately takes tens
+    // of seconds. Generation supersedes any prior active path, so retrying is
+    // safe — do it automatically instead of stranding a first-time visitor on
+    // a cold start.
+    const attempts = 3;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      try {
+        const me = await auth.me();
+        await onboardingApi.generatePath(me.id, goal);
+        router.replace("/dashboard");
+        return;
+      } catch (e) {
+        // A goal the graph cannot map yet is not a wall — it is exactly what
+        // career discovery is for. Pivot there with the goal as the signal,
+        // instead of stranding the learner on an error under a "Got it".
+        if (e instanceof ApiError && e.code === "goal_unresolved") {
+          setCareers(null);
+          setTurns([{ question: "What are you aiming for?", answer: goal }]);
+          setInterviewQ(null);
+          setStage("discover");
+          setError("I couldn't map that goal exactly — let's find the closest direction.");
+          void advanceInterview();
+          return;
+        }
+        const transient = !(e instanceof ApiError) || e.status >= 500;
+        if (transient && attempt < attempts) {
+          setBuildNote(
+            `The engine is waking up — retrying automatically (${attempt + 1}/${attempts})…`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 12000));
+          continue;
+        }
+        setStage("confirm");
+        setBuildNote(null);
+        setError(
+          e instanceof ApiError
+            ? e.message
+            : "I couldn't build your roadmap. Please try again.",
+        );
         return;
       }
-      setStage("confirm");
-      setError(
-        e instanceof ApiError
-          ? e.message
-          : "I couldn't build your roadmap. Please try again.",
-      );
     }
   };
 
@@ -480,8 +501,12 @@ export function Onboarding() {
               <h1 className="display mt-3 text-[24px] font-semibold">Charting your universe…</h1>
               <p className="mx-auto mt-3 max-w-sm text-[13px] leading-relaxed text-text-2">
                 Finding your position in the skill graph, ordering what&apos;s
-                missing by prerequisite, and fitting it to your week.
+                missing by prerequisite, and fitting it to your week. A brand-new
+                goal can take up to a minute while the route is designed.
               </p>
+              {buildNote && (
+                <p className="mx-auto mt-3 max-w-sm text-[12px] text-amber">{buildNote}</p>
+              )}
               <div className="mx-auto mt-6 h-px w-40 overflow-hidden bg-line">
                 <div className="energy-line h-full w-full" />
               </div>
