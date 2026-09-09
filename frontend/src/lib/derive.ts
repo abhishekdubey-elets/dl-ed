@@ -123,6 +123,9 @@ export function buildDashboardData(input: {
             phase: ph.title,
             milestone: m.title,
             estimatedMinutes: item.estimated_minutes,
+            url: item.url ?? null,
+            itemId: item.id ?? null,
+            resourceId: item.resource_id ?? null,
           };
           currentMilestone = m.title;
           break outer;

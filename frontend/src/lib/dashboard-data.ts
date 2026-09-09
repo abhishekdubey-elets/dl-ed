@@ -42,6 +42,10 @@ export interface NextActionDatum {
   phase: string;
   milestone: string;
   estimatedMinutes: number;
+  /** The course link to open; null for assessments/reviews. */
+  url: string | null;
+  itemId: string | null;
+  resourceId: string | null;
 }
 
 export interface RecommendationDatum {

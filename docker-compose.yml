@@ -38,6 +38,11 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+      args:
+        # true bakes sentence-transformers/torch into the local image for
+        # EMBEDDING_PROVIDER=sentence_transformer. Render builds straight from
+        # the Dockerfile default (false), so production stays slim.
+        INSTALL_EMBEDDINGS: ${INSTALL_EMBEDDINGS:-false}
     container_name: lpr-api
     # Optional: settings all have safe defaults, so the stack boots without it.
     env_file:
@@ -71,6 +76,9 @@ services:
       # Live reload during development; drop this in production images.
       - ./backend/app:/app/app
       - ./backend/alembic:/app/alembic
+      # Sentence-transformer model cache — survives container recreation, so
+      # the ~90MB model downloads once, not on every boot.
+      - hf_cache:/home/appuser/.cache/huggingface
     command:
       ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     restart: unless-stopped
@@ -78,3 +86,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  hf_cache:

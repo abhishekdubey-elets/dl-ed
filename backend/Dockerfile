@@ -14,8 +14,16 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends build-essential libpq-dev curl \
  && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt ./
+COPY requirements.txt requirements-embeddings.txt ./
+# Optional local-embeddings layer (sentence-transformers + torch). OFF by
+# default so the production image stays slim; enable for a dev build with
+#   docker compose build --build-arg INSTALL_EMBEDDINGS=true api
+# (or INSTALL_EMBEDDINGS=true in the root .env — compose passes it through).
+ARG INSTALL_EMBEDDINGS=false
 RUN pip install --no-cache-dir -r requirements.txt \
+ && if [ "$INSTALL_EMBEDDINGS" = "true" ]; then \
+      pip install --no-cache-dir -r requirements-embeddings.txt; \
+    fi \
  && apt-get purge -y --auto-remove build-essential
 
 COPY alembic.ini ./
