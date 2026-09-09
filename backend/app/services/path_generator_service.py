@@ -33,9 +33,11 @@ from app.models.enums import (
     PathItemStatus,
     PathItemType,
     PathStatus,
+    ProgressEventType,
     ResourceType,
 )
 from app.models.path import LearningPath, LearningPathItem
+from app.models.progress import UserProgress
 from app.models.resource import Resource, ResourceSkill
 from app.repositories.assessment import AssessmentRepository
 from app.repositories.path import LearningPathItemRepository, LearningPathRepository
@@ -112,7 +114,11 @@ class PathGeneratorService(BaseService):
 
         profile = await self.profiles.get_by_user(learner_id)
         constraints = self._constraints(request, profile)
-        milestones = await self._build_milestones(computed, constraints)
+        # Courses the learner has already finished (on any path). The selector
+        # prefers these so a new goal reuses proven work instead of assigning a
+        # near-duplicate; _persist then births those items COMPLETED.
+        already_done = await self._completed_resource_ids(learner_id)
+        milestones = await self._build_milestones(computed, constraints, already_done)
         capstone = await self._build_capstone(request, computed)
         goal = GoalInput(
             title=request.goal_text or "Your learning goal",
@@ -198,7 +204,10 @@ class PathGeneratorService(BaseService):
         )
 
     async def _build_milestones(
-        self, computed, constraints: PathConstraints
+        self,
+        computed,
+        constraints: PathConstraints,
+        already_done: set[uuid.UUID] = frozenset(),  # type: ignore[assignment]
     ) -> list[MilestoneInput]:
         milestones: list[MilestoneInput] = []
         preferred = set(constraints.preferred_modalities)
@@ -218,7 +227,9 @@ class PathGeneratorService(BaseService):
                 for pid in gap.prerequisite_ids
                 if pid in computed.nodes
             )
-            picks = await self._select_resources(gap.skill_id, preferred, exclude=used)
+            picks = await self._select_resources(
+                gap.skill_id, preferred, exclude=used, prefer=already_done
+            )
             used.update(p.resource_id for p in picks)
             assessment = await self._select_assessment(gap.skill_id)
             milestones.append(
@@ -242,12 +253,20 @@ class PathGeneratorService(BaseService):
         return milestones
 
     async def _select_resources(
-        self, skill_id: uuid.UUID, preferred: set[str], *, exclude: set[uuid.UUID] = frozenset()
+        self,
+        skill_id: uuid.UUID,
+        preferred: set[str],
+        *,
+        exclude: set[uuid.UUID] = frozenset(),
+        prefer: set[uuid.UUID] = frozenset(),
     ) -> tuple[ResourcePick, ...]:
         """Best resources teaching a skill: quality first, preferred modality as a
         tiebreak. Deterministic — a resource that teaches the milestone skill is
         appropriate by the time the learner reaches this phase. `exclude` keeps
-        a resource already planned for an earlier milestone from repeating."""
+        a resource already planned for an earlier milestone from repeating.
+        `prefer` (resources the learner already completed) ranks above all else:
+        finished work carries across goals rather than being reassigned as a
+        near-duplicate course."""
         candidates = [
             c for c in await self._teaching_resources(skill_id) if c.id not in exclude
         ]
@@ -261,9 +280,25 @@ class PathGeneratorService(BaseService):
             candidates = [
                 c for c in await self._teaching_resources(skill_id) if c.id not in exclude
             ]
+        if prefer:
+            # A completed course that teaches this skill belongs in the pool even
+            # when it fell outside the top-quality shortlist.
+            known = {c.id for c in candidates}
+            done_here = await self.resources.list(
+                limit=_RESOURCES_PER_MILESTONE,
+                filters=[
+                    Resource.is_active.is_(True),
+                    ResourceRepository.teaches_skill_filter(skill_id),
+                    Resource.id.in_(prefer),
+                ],
+            )
+            candidates.extend(
+                c for c in done_here if c.id not in known and c.id not in exclude
+            )
         ranked = sorted(
             candidates,
             key=lambda r: (
+                0 if r.id in prefer else 1,
                 0 if r.modality.value in preferred else 1,
                 -(r.quality_score or 0.0),
                 str(r.id),
@@ -387,6 +422,13 @@ class PathGeneratorService(BaseService):
         if request.activate:
             await self._supersede_active(learner_id)
 
+        # A resource the learner has ALREADY completed — on any previous path —
+        # stays completed on this one. Item status is per-path, but a finished
+        # course is finished whatever the goal: the append-only event log is
+        # the evidence, keyed by resource, and a new goal must not ask anyone
+        # to redo work they can prove they did.
+        already_done = await self._completed_resource_ids(learner_id)
+
         phase_dates = {p.index: (p.planned_start, p.planned_end) for p in roadmap.phases}
         phase_meta = {
             p.index: {"title": p.title, "objective": p.objective, "is_capstone": p.is_capstone}
@@ -451,7 +493,9 @@ class PathGeneratorService(BaseService):
                     title=item.title,
                     item_type=item_type,
                     status=(
-                        PathItemStatus.AVAILABLE
+                        PathItemStatus.COMPLETED
+                        if item.resource_id is not None and item.resource_id in already_done
+                        else PathItemStatus.AVAILABLE
                         if item.phase_index == 0
                         else PathItemStatus.LOCKED
                     ),
@@ -462,8 +506,40 @@ class PathGeneratorService(BaseService):
                 )
             )
         await self.session.flush()
+
+        # Event-sourcing stays authoritative: each carried-over completion gets
+        # its own event on the NEW path's item (zero minutes — the time was
+        # already recorded on the original completion), so derived summaries
+        # count it without double-counting effort.
+        created_items = await self.path_items.list_for_path(path.id)
+        for created in created_items:
+            if created.status == PathItemStatus.COMPLETED:
+                self.session.add(
+                    UserProgress(
+                        user_id=learner_id,
+                        path_item_id=created.id,
+                        resource_id=created.resource_id,
+                        event_type=ProgressEventType.COMPLETED,
+                        progress_pct=100.0,
+                        time_spent_minutes=0,
+                        details={"source": "prior_learning", "carried_over": True},
+                    )
+                )
+        await self.session.flush()
         await self.commit()
         return path
+
+    async def _completed_resource_ids(self, learner_id: uuid.UUID) -> set[uuid.UUID]:
+        from sqlalchemy import select
+
+        rows = await self.session.execute(
+            select(UserProgress.resource_id).where(
+                UserProgress.user_id == learner_id,
+                UserProgress.event_type == ProgressEventType.COMPLETED,
+                UserProgress.resource_id.is_not(None),
+            )
+        )
+        return {r for r in rows.scalars().all() if r is not None}
 
     async def _supersede_active(self, learner_id: uuid.UUID) -> None:
         active = await self.paths.list(
